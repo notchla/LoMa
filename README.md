@@ -73,6 +73,34 @@ Use `uv run eval.py --help` to explore the different options.
 ### Expected Results
 The results are similar to those reported in the paper. For example, running the evaluation for LoMa-B on WxBS gives us `mAA_10px: 0.6876`.
 
+## TensorRT
+We provide scripts to export `detect_and_describe` and the matcher scores to ONNX and build TensorRT engines from them. Install the optional dependencies with `uv sync --extra export`. Engines only run on the TensorRT version that built them, so change the `tensorrt-cu13` pin in `pyproject.toml` to match your TensorRT installation if you plan to use its runtime or `trtexec`.
+```bash
+uv run export_onnx.py matcher:loma-b --precision fp16 --size 784 784
+uv run export_trt.py exports/loma_B_detect_describe_784x784_fp16.onnx
+uv run export_trt.py exports/loma_B_matcher_2048_fp16.onnx
+uv run demo_trt.py matcher:loma-b --precision fp16
+```
+[demo_trt.py](demo_trt.py) shows how to match an image pair with the engines and compares the results with PyTorch. Things to keep in mind:
+- Input shapes are static, so you need one engine per image size, and images must be resized to it. For DINOv2-based models (all but LoMa-B128), height and width must be multiples of 14.
+- TensorRT 11 builds strongly typed networks, so the precision (`fp16` or `fp32`) is chosen at ONNX export time.
+- TensorRT's TopK limits `num_keypoints` to at most 3840.
+- All engine inputs and outputs are FP32, also for `--precision fp16`, which only sets the precision inside the graph.
+- Match filtering (`filter_matches`) and the conversion to pixel coordinates (`to_pixel_coords`) run in Python, not in the engines.
+
+| Engine | Tensor | | Shape | Format |
+| --- | --- | --- | --- | --- |
+| detect/describe | `image` | in | (1, 3, H, W) | RGB in [0, 1], batch size 1. The ImageNet normalization is part of the engine. |
+| | `keypoints` | out | (1, N, 2) | `grid_sample` coordinates in [-1, 1], not pixels |
+| | `descriptions` | out | (1, N, D) | |
+| matcher | `kpts0`, `kpts1` | in | (1, N, 2) | as returned by the detect/describe engine |
+| | `desc0`, `desc1` | in | (1, N, D) | |
+| | `scores` | out | (1, N, N) | dual-softmax match confidences in [0, 1], row *i* for keypoint *i* of image A |
+
+N is `num_keypoints` (2048 by default) and D is `input_dim` of the model: 256, or 128 for LoMa-B128.
+
+We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 3080 Laptop GPU. On the Toronto pair at 784×784, the FP16 engines find the same 267 matches as PyTorch, in about 305 ms instead of 512 ms.
+
 ## Sizes
 We an array of models: LoMA-{B, B128, L, G, R}. For most usecases LoMa-B, which is the same size as LightGlue, works fine. LoMa-G is significantly heavier but gives the most accurate matches, even surpassing the RoMa-family on e.g. WxBS and IMC22. LoMa-R provides a rotation invariant matcher and descriptor (through data augmentation).
 

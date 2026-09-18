@@ -34,6 +34,12 @@ dev = [
     "ruff",
     "pyright",
 ]
+export = [
+    "onnx",
+    "onnxscript",
+    # Pinned to the system TensorRT (trtexec / libnvinfer) so engines are interchangeable.
+    "tensorrt-cu13==11.2.1.2",
+]
 
 [tool.pyright]
 include = ["src"]
