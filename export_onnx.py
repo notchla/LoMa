@@ -3,7 +3,7 @@
     uv sync --extra export
     uv run export_onnx.py matcher:loma-b --precision fp16 --size 784 784
 
-Input shapes are static: build one engine per image size.
+The image size is static: build one engine per image size.
 """
 
 import dataclasses
@@ -97,10 +97,12 @@ def main(
     precision: Literal["fp16", "fp32"] = "fp16",
     size: tuple[int, int] = (784, 784),
     out_dir: Path = Path("exports"),
+    max_batch: int = 1,
 ):
     """
     Args:
         size: (H, W) of the input image. Must be multiples of 14 for DINOv2 descriptors (all but LoMa-B128).
+        max_batch: Above 1, the matcher gets a dynamic batch dimension of up to this size.
     """
     num_keypoints = matcher.num_keypoints
     assert num_keypoints <= TRT_MAX_TOPK, (
@@ -112,14 +114,24 @@ def main(
     model = load_model(matcher, precision)
 
     detect_describe_path = out_dir / f"{name}_detect_describe_{H}x{W}_{precision}.onnx"
-    matcher_path = out_dir / f"{name}_matcher_{num_keypoints}_{precision}.onnx"
+    dynamic_batch = max_batch > 1
+    batch_tag = f"_b{max_batch}" if dynamic_batch else ""
+    matcher_path = (
+        out_dir / f"{name}_matcher_{num_keypoints}{batch_tag}_{precision}.onnx"
+    )
     image = torch.rand(1, 3, H, W, device=device)
+    # torch.export specializes dimensions of size 0 and 1, so a dynamic batch is traced at 2.
+    B = 2 if dynamic_batch else 1
+    matcher_shapes = None
+    if dynamic_batch:
+        batch = torch.export.Dim("batch", min=1, max=max_batch)
+        matcher_shapes = tuple({0: batch} for _ in range(4))
     # Separate tensors per image: torch.export merges inputs that are the same tensor object.
     kpts0, kpts1 = (
-        torch.rand(1, num_keypoints, 2, device=device) * 2 - 1 for _ in range(2)
+        torch.rand(B, num_keypoints, 2, device=device) * 2 - 1 for _ in range(2)
     )
     desc0, desc1 = (
-        torch.randn(1, num_keypoints, matcher.input_dim, device=device)
+        torch.randn(B, num_keypoints, matcher.input_dim, device=device)
         for _ in range(2)
     )
     # optimize=False: onnxscript's Conv+BatchNorm fusion writes FP32 kernels for FP16 convs, which
@@ -144,6 +156,7 @@ def main(
             optimize=False,
             input_names=["kpts0", "kpts1", "desc0", "desc1"],
             output_names=["scores"],
+            dynamic_shapes=matcher_shapes,
         )
     print(f"Saved {detect_describe_path} and {matcher_path}")
 

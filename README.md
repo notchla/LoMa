@@ -82,7 +82,8 @@ uv run export_trt.py exports/loma_B_matcher_2048_fp16.onnx
 uv run demo_trt.py matcher:loma-b --precision fp16
 ```
 [demo_trt.py](demo_trt.py) shows how to match an image pair with the engines and compares the results with PyTorch. Things to keep in mind:
-- Input shapes are static, so you need one engine per image size, and images must be resized to it. For DINOv2-based models (all but LoMa-B128), height and width must be multiples of 14.
+- The image size is static, so you need one engine per image size, and images must be resized to it. For DINOv2-based models (all but LoMa-B128), height and width must be multiples of 14.
+- The matcher can take a dynamic batch of image pairs: export it with `--max-batch 16` and `export_trt.py` builds an optimization profile from its `--batch` (min, opt, max), (1, 8, 16) by default.
 - TensorRT 11 builds strongly typed networks, so the precision (`fp16` or `fp32`) is chosen at ONNX export time.
 - TensorRT's TopK limits `num_keypoints` to at most 3840.
 - All engine inputs and outputs are FP32, also for `--precision fp16`, which only sets the precision inside the graph.
@@ -93,13 +94,20 @@ uv run demo_trt.py matcher:loma-b --precision fp16
 | detect/describe | `image` | in | (1, 3, H, W) | RGB in [0, 1], batch size 1. The ImageNet normalization is part of the engine. |
 | | `keypoints` | out | (1, N, 2) | `grid_sample` coordinates in [-1, 1], not pixels |
 | | `descriptions` | out | (1, N, D) | |
-| matcher | `kpts0`, `kpts1` | in | (1, N, 2) | as returned by the detect/describe engine |
-| | `desc0`, `desc1` | in | (1, N, D) | |
-| | `scores` | out | (1, N, N) | dual-softmax match confidences in [0, 1], row *i* for keypoint *i* of image A |
+| matcher | `kpts0`, `kpts1` | in | (B, N, 2) | as returned by the detect/describe engine |
+| | `desc0`, `desc1` | in | (B, N, D) | |
+| | `scores` | out | (B, N, N) | dual-softmax match confidences in [0, 1], row *i* for keypoint *i* of image A |
 
-N is `num_keypoints` (2048 by default) and D is `input_dim` of the model: 256, or 128 for LoMa-B128.
+N is `num_keypoints` (2048 by default) and D is `input_dim` of the model: 256, or 128 for LoMa-B128. B is 1, or up to `--max-batch` for a dynamic-batch matcher.
 
 We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 3080 Laptop GPU. On the Toronto pair at 784×784, the FP16 engines find the same 267 matches as PyTorch, in about 305 ms instead of 512 ms.
+
+[profile_trt.py](profile_trt.py) times the static matcher engine, called once per pair, against a dynamic-batch one (`--dynamic-engine`), and checks that their scores agree. With LoMa-B at FP16 on an RTX 5090, the static engine takes 2.6 ms per pair. The dynamic engine returns bit-identical scores. It is 1.4× slower for a single pair (3.6 ms) and about 1.5× faster from a batch of 8 (1.7 ms per pair):
+
+| B | 1 | 2 | 4 | 8 | 16 |
+| --- | --- | --- | --- | --- | --- |
+| static, ms per pair | 2.6 | 2.6 | 2.6 | 2.6 | 2.6 |
+| dynamic, ms per pair | 3.6 | 2.4 | 2.0 | 1.7 | 1.7 |
 
 ## Sizes
 We an array of models: LoMA-{B, B128, L, G, R}. For most usecases LoMa-B, which is the same size as LightGlue, works fine. LoMa-G is significantly heavier but gives the most accurate matches, even surpassing the RoMa-family on e.g. WxBS and IMC22. LoMa-R provides a rotation invariant matcher and descriptor (through data augmentation).

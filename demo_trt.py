@@ -39,18 +39,20 @@ class TRTEngine:
         self.stream = torch.cuda.Stream()
 
     def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
-        # Engines from export_trt.py have static shapes and float32 inputs and outputs.
+        # Engines from export_trt.py have float32 inputs and outputs.
         inputs = {name: x.float().contiguous() for name, x in inputs.items()}
         self.stream.wait_stream(torch.cuda.current_stream())
         outputs = {}
         with torch.cuda.stream(self.stream):
-            for name in self.names:
-                if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-                    tensor = inputs[name]
-                else:
-                    shape = tuple(self.engine.get_tensor_shape(name))
-                    tensor = outputs[name] = torch.empty(shape, device="cuda")
+            # Output shapes are only known once every input shape is set.
+            for name, tensor in inputs.items():
+                self.context.set_input_shape(name, tuple(tensor.shape))
                 self.context.set_tensor_address(name, tensor.data_ptr())
+            for name in self.names:
+                if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
+                    shape = tuple(self.context.get_tensor_shape(name))
+                    tensor = outputs[name] = torch.empty(shape, device="cuda")
+                    self.context.set_tensor_address(name, tensor.data_ptr())
             self.context.execute_async_v3(self.stream.cuda_stream)
         self.stream.synchronize()
         return outputs
