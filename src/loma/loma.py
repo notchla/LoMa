@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import re
 import sys
-from typing import Callable, Literal, Tuple
+from typing import Literal, Tuple
 import numpy as np
 from PIL import Image
 
@@ -133,25 +133,18 @@ class CrossBlock(nn.Module):
             nn.Linear(2 * embed_dim, embed_dim),
         )
 
-    def map_(self, func: Callable, x0: torch.Tensor, x1: torch.Tensor):
-        return func(x0), func(x1)
-
-    def forward(
-        self, x0: torch.Tensor, x1: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        qk0, qk1 = self.map_(self.to_qk, x0, x1)
-        v0, v1 = self.map_(self.to_v, x0, x1)
-        qk0, qk1, v0, v1 = map(
-            lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
-            (qk0, qk1, v0, v1),
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: both images stacked along the batch, (2B, N, D) with image 0 first."""
+        qk, v = (
+            f(x).unflatten(-1, (self.heads, -1)).transpose(1, 2)
+            for f in (self.to_qk, self.to_v)
         )
-        m0 = F.scaled_dot_product_attention(qk0, qk1, v1)
-        m1 = F.scaled_dot_product_attention(qk1, qk0, v0)
-        m0, m1 = self.map_(lambda t: t.transpose(1, 2).flatten(start_dim=-2), m0, m1)
-        m0, m1 = self.map_(self.to_out, m0, m1)
-        x0 = x0 + self.ffn(torch.cat([x0, m0], -1))
-        x1 = x1 + self.ffn(torch.cat([x1, m1], -1))
-        return x0, x1
+        # Swap the image halves with flip, not slicing or chunk: torch.export cannot size a cat of
+        # slices on a dynamic batch, and chunk exports to SplitToSequence, which TensorRT rejects.
+        qk1, v1 = (t.unflatten(0, (2, -1)).flip(0).flatten(0, 1) for t in (qk, v))
+        m = F.scaled_dot_product_attention(qk, qk1, v1)
+        m = self.to_out(m.transpose(1, 2).flatten(start_dim=-2))
+        return x + self.ffn(torch.cat([x, m], -1))
 
 
 class TransformerLayer(nn.Module):
@@ -160,10 +153,8 @@ class TransformerLayer(nn.Module):
         self.self_attn = SelfBlock(*args, **kwargs)
         self.cross_attn = CrossBlock(*args, **kwargs)
 
-    def forward(self, desc0, desc1, encoding0, encoding1):
-        desc0 = self.self_attn(desc0, encoding0)
-        desc1 = self.self_attn(desc1, encoding1)
-        return self.cross_attn(desc0, desc1)
+    def forward(self, desc: torch.Tensor, encoding: torch.Tensor) -> torch.Tensor:
+        return self.cross_attn(self.self_attn(desc, encoding))
 
 
 def log_double_softmax(
@@ -358,14 +349,14 @@ class LoMa(Model):
             kpts1 = kpts1.to(device)
             desc0 = desc0.to(device).detach().contiguous()
             desc1 = desc1.to(device).detach().contiguous()
-            desc0 = self.input_proj(desc0)
-            desc1 = self.input_proj(desc1)
-            encoding0 = self.posenc(kpts0)
-            encoding1 = self.posenc(kpts1)
+            # Both images share one batch through the transformer, so every kernel gets twice the work.
+            desc = self.input_proj(torch.cat([desc0, desc1]))
+            encoding = self.posenc(torch.cat([kpts0, kpts1]))
             scores = None
             for i in range(self.cfg.n_layers):
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1)
-            scores, _ = self.log_assignment[i](desc0, desc1)
+                desc = self.transformers[i](desc, encoding)
+            B = desc0.shape[0]
+            scores, _ = self.log_assignment[i](desc[:B], desc[B:])
             assert scores is not None
 
         return {

@@ -100,14 +100,14 @@ uv run demo_trt.py matcher:loma-b --precision fp16
 
 N is `num_keypoints` (2048 by default) and D is `input_dim` of the model: 256, or 128 for LoMa-B128. B is 1, or up to `--max-batch` for dynamic-batch engines.
 
-We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 3080 Laptop GPU. On the Toronto pair at 784×784, the FP16 engines find the same 267 matches as PyTorch, in about 305 ms instead of 512 ms.
+We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 5090. On the Toronto pair at 784×784, the FP16 engines find 268 matches where PyTorch finds 267, in 50 ms instead of 108 ms.
 
-[profile_trt.py](profile_trt.py) times the static matcher engine, called once per pair, against a dynamic-batch one (`--dynamic-engine`), and checks that their scores agree. With LoMa-B at FP16 on an RTX 5090, the static engine takes 2.6 ms per pair. The dynamic engine returns bit-identical scores. It is 1.4× slower for a single pair (3.6 ms) and about 1.5× faster from a batch of 8 (1.7 ms per pair):
+[profile_trt.py](profile_trt.py) times the static matcher engine, called once per pair, against a dynamic-batch one (`--dynamic-engine`), and checks that their scores agree. With LoMa-B at FP16 on an RTX 5090, the static engine takes 1.9 ms per pair. The dynamic engine returns bit-identical scores. It is 1.2× slower for a single pair (2.3 ms) and at best 1.1× faster, at a batch of 8 (1.7 ms per pair). The matcher already runs both images of a pair as one batch, so a single pair keeps the GPU busy:
 
 | B | 1 | 2 | 4 | 8 | 16 |
 | --- | --- | --- | --- | --- | --- |
-| static, ms per pair | 2.6 | 2.6 | 2.6 | 2.6 | 2.6 |
-| dynamic, ms per pair | 3.6 | 2.4 | 2.0 | 1.7 | 1.7 |
+| static, ms per pair | 1.9 | 1.9 | 1.9 | 1.9 | 1.9 |
+| dynamic, ms per pair | 2.3 | 2.0 | 1.8 | 1.7 | 1.9 |
 
 [profile_detect_describe_trt.py](profile_detect_describe_trt.py) does the same for the detect/describe engine, on the Toronto images. Batching does not pay off there: at 784×784 the dynamic engine is slower than calling the static one (23.1 ms per image) at every batch size. Its keypoints agree with the static engine's within 1 px for 99.8% (as closely as the static engine agrees with PyTorch), with descriptor cosine similarity above 0.999:
 
