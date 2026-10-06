@@ -102,7 +102,7 @@ def main(
     """
     Args:
         size: (H, W) of the input image. Must be multiples of 14 for DINOv2 descriptors (all but LoMa-B128).
-        max_batch: Above 1, the matcher gets a dynamic batch dimension of up to this size.
+        max_batch: Above 1, both graphs get a dynamic batch dimension of up to this size.
     """
     num_keypoints = matcher.num_keypoints
     assert num_keypoints <= TRT_MAX_TOPK, (
@@ -113,18 +113,21 @@ def main(
     out_dir.mkdir(parents=True, exist_ok=True)
     model = load_model(matcher, precision)
 
-    detect_describe_path = out_dir / f"{name}_detect_describe_{H}x{W}_{precision}.onnx"
     dynamic_batch = max_batch > 1
     batch_tag = f"_b{max_batch}" if dynamic_batch else ""
+    detect_describe_path = (
+        out_dir / f"{name}_detect_describe_{H}x{W}{batch_tag}_{precision}.onnx"
+    )
     matcher_path = (
         out_dir / f"{name}_matcher_{num_keypoints}{batch_tag}_{precision}.onnx"
     )
-    image = torch.rand(1, 3, H, W, device=device)
     # torch.export specializes dimensions of size 0 and 1, so a dynamic batch is traced at 2.
     B = 2 if dynamic_batch else 1
-    matcher_shapes = None
+    image = torch.rand(B, 3, H, W, device=device)
+    detect_describe_shapes = matcher_shapes = None
     if dynamic_batch:
         batch = torch.export.Dim("batch", min=1, max=max_batch)
+        detect_describe_shapes = ({0: batch},)
         matcher_shapes = tuple({0: batch} for _ in range(4))
     # Separate tensors per image: torch.export merges inputs that are the same tensor object.
     kpts0, kpts1 = (
@@ -146,6 +149,7 @@ def main(
             optimize=False,
             input_names=["image"],
             output_names=["keypoints", "descriptions"],
+            dynamic_shapes=detect_describe_shapes,
         )
         torch.onnx.export(
             Matcher(model).eval(),

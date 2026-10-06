@@ -16,14 +16,15 @@ from loma import LoMaB
 from loma.cfg import LoMaConfig
 
 
-def run_looped(engine: TRTEngine, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+def run_looped(
+    engine: TRTEngine, inputs: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     batch = next(iter(inputs.values())).shape[0]
-    return torch.cat(
-        [
-            engine(**{name: x[i : i + 1] for name, x in inputs.items()})["scores"]
-            for i in range(batch)
-        ]
-    )
+    outputs = [
+        engine(**{name: x[i : i + 1] for name, x in inputs.items()})
+        for i in range(batch)
+    ]
+    return {name: torch.cat([out[name] for out in outputs]) for name in outputs[0]}
 
 
 def main(
@@ -61,7 +62,9 @@ def main(
         print(f"{B:>3} {static_ms:>10.2f} {static_ms / B:>7.2f}", end="")
         if dynamic is not None:
             dynamic_ms = latency_ms(partial(dynamic, **inputs), iters)
-            diff = (dynamic(**inputs)["scores"] - run_looped(static, inputs)).abs()
+            diff = (
+                dynamic(**inputs)["scores"] - run_looped(static, inputs)["scores"]
+            ).abs()
             print(
                 f" {dynamic_ms:>11.2f} {dynamic_ms / B:>7.2f} {static_ms / dynamic_ms:>7.2f}x"
                 f" {diff.max():>9.2e} {diff.mean():>9.2e}",

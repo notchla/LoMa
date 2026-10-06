@@ -91,7 +91,12 @@ def sample_keypoints(
             local_density_x, weights[..., None], padding=(coverage_size // 2, 0)
         )[:, 0]
         keypoint_probs = keypoint_probs * (local_density + 1e-8) ** (-coverage_pow)
-    grid = get_normalized_grid(B, H, W, overload_device=device).reshape(B, H * W, 2)
+    # Built at batch 1 and expanded: a grid over B would fix the batch size under torch.export.
+    grid = (
+        get_normalized_grid(1, H, W, overload_device=device)
+        .reshape(1, H * W, 2)
+        .expand(B, -1, -1)
+    )
     if use_nms:
         keypoint_probs = keypoint_probs * (
             keypoint_probs
@@ -113,15 +118,17 @@ def sample_keypoints(
         if scoremap is None:
             raise ValueError("scoremap is required when subpixel=True")
         offsets = get_normalized_grid(
-            B, nms_size, nms_size, overload_device=device
-        ).reshape(B, nms_size**2, 2)  # B x K_H x K_W x 2
+            1, nms_size, nms_size, overload_device=device
+        ).reshape(1, nms_size**2, 2)  # 1 x K_H x K_W x 2
         offsets[..., 0] = offsets[..., 0] * nms_size / W
         offsets[..., 1] = offsets[..., 1] * nms_size / H
         keypoint_patch_scores = extract_patches_from_inds(scoremap, inds, nms_size)
         keypoint_patch_probs = (keypoint_patch_scores / subpixel_temp).softmax(
             dim=1
         )  # B x K_H * K_W x N
-        keypoint_offsets = torch.einsum("bkn, bkd ->bnd", keypoint_patch_probs, offsets)
+        keypoint_offsets = torch.einsum(
+            "bkn, bkd ->bnd", keypoint_patch_probs, offsets.expand(B, -1, -1)
+        )
         kps = kps + keypoint_offsets
     if return_probs:
         return kps, torch.gather(keypoint_probs.reshape(B, H * W), dim=1, index=inds)
