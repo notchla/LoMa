@@ -100,7 +100,7 @@ uv run demo_trt.py matcher:loma-b --precision fp16
 
 N is `num_keypoints` (2048 by default) and D is `input_dim` of the model: 256, or 128 for LoMa-B128. B is 1, or up to `--max-batch` for dynamic-batch engines.
 
-We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 5090. On the Toronto pair at 784×784, the FP16 engines find 268 matches where PyTorch finds 267, in 50 ms instead of 108 ms.
+We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 5090. On the Toronto pair at 784×784, the FP16 engines find 268 matches where PyTorch finds 270, in 39 ms instead of 107 ms.
 
 [profile_trt.py](profile_trt.py) times the static matcher engine, called once per pair, against a dynamic-batch one (`--dynamic-engine`), and checks that their scores agree. With LoMa-B at FP16 on an RTX 5090, the static engine takes 1.9 ms per pair. The dynamic engine returns bit-identical scores. It is 1.2× slower for a single pair (2.3 ms) and at best 1.1× faster, at a batch of 8 (1.7 ms per pair). The matcher already runs both images of a pair as one batch, so a single pair keeps the GPU busy:
 
@@ -109,12 +109,12 @@ We tested this with LoMa-B, TensorRT 11.2 and torch 2.11 on an RTX 5090. On the 
 | static, ms per pair | 1.9 | 1.9 | 1.9 | 1.9 | 1.9 |
 | dynamic, ms per pair | 2.3 | 2.0 | 1.8 | 1.7 | 1.9 |
 
-[profile_detect_describe_trt.py](profile_detect_describe_trt.py) does the same for the detect/describe engine, on the Toronto images. Batching does not pay off there: at 784×784 the dynamic engine is slower than calling the static one (23.1 ms per image) at every batch size. Its keypoints agree with the static engine's within 1 px for 99.8% (as closely as the static engine agrees with PyTorch), with descriptor cosine similarity above 0.999:
+[profile_detect_describe_trt.py](profile_detect_describe_trt.py) does the same for the detect/describe engine, on the Toronto images. Batching does not pay off there: at 784×784 the dynamic engine is slower than calling the static one (18.3–18.6 ms per image) at every batch size. Its keypoints agree with the static engine's within 1 px for 99.9% (as closely as the static engine agrees with PyTorch), with descriptor cosine similarity above 0.999:
 
 | B | 1 | 2 | 4 | 8 | 16 |
 | --- | --- | --- | --- | --- | --- |
-| static, ms per image | 23.0 | 23.1 | 23.0 | 23.1 | 23.1 |
-| dynamic, ms per image | 30.1 | 27.2 | 26.1 | 25.7 | 26.3 |
+| static, ms per image | 18.3 | 18.3 | 18.5 | 18.6 | 18.6 |
+| dynamic, ms per image | 20.2 | 19.3 | 18.9 | 18.9 | 19.4 |
 
 ## Sizes
 We an array of models: LoMA-{B, B128, L, G, R}. For most usecases LoMa-B, which is the same size as LightGlue, works fine. LoMa-G is significantly heavier but gives the most accurate matches, even surpassing the RoMa-family on e.g. WxBS and IMC22. LoMa-R provides a rotation invariant matcher and descriptor (through data augmentation).
