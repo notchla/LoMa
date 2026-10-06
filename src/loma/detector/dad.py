@@ -1,3 +1,4 @@
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -16,6 +17,39 @@ from loma.detector.utils import sample_keypoints
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def _bicubic_matrix(n_in: int, n_out: int) -> np.ndarray:
+    # NumPy so torch.export embeds a constant instead of tracing ops TensorRT cannot parse.
+    # Matches F.interpolate's bicubic: unclamped source coordinate, clamped taps.
+    A = -0.75
+    src = (np.arange(n_out) + 0.5) * (n_in / n_out) - 0.5
+    x0 = np.floor(src)
+    t = src - x0
+    weights = [
+        ((A * (t + 1) - 5 * A) * (t + 1) + 8 * A) * (t + 1) - 4 * A,
+        ((A + 2) * t - (A + 3)) * t * t + 1,
+        ((A + 2) * (1 - t) - (A + 3)) * (1 - t) * (1 - t) + 1,
+        ((A * (2 - t) - 5 * A) * (2 - t) + 8 * A) * (2 - t) - 4 * A,
+    ]
+    m = np.zeros((n_out, n_in), dtype=np.float32)
+    for offset, w in zip(range(-1, 3), weights):
+        np.add.at(
+            m, (np.arange(n_out), np.clip(x0 + offset, 0, n_in - 1).astype(int)), w
+        )
+    return m
+
+
+def bicubic_resize(x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+    """F.interpolate(x, size, mode="bicubic", align_corners=False) as two matmuls.
+
+    TensorRT fuses chained bicubic F.interpolate calls into one kernel that recomputes every
+    intermediate map per output pixel; matmuls stop that fusion.
+    """
+    (h, w), (H, W) = x.shape[-2:], size
+    m_h, m_w = (torch.from_numpy(_bicubic_matrix(*n)).to(x) for n in ((h, H), (w, W)))
+    return m_h @ x @ m_w.mT
 
 
 def _images_from_detector_input(
@@ -105,9 +139,7 @@ class DaD(Model):
             )  # ensure float (need bf16 doesnt have f.interpolate)
             if idx < len(scales) - 1:
                 size = sizes[-(idx + 2)]
-                logits = F.interpolate(
-                    logits, size=size, mode="bicubic", align_corners=False
-                )
+                logits = bicubic_resize(logits, size)
                 context = F.interpolate(
                     context.float(), size=size, mode="bilinear", align_corners=False
                 )
