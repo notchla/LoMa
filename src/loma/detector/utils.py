@@ -26,6 +26,25 @@ def extract_patches_from_inds(x: torch.Tensor, inds: torch.Tensor, patch_size: i
     return patches
 
 
+def topk_indices(x: torch.Tensor, k: int, tiles: int = 16) -> torch.Tensor:
+    """torch.topk(x, k).indices for a (B, N) tensor, as a top-k per tile followed by a top-k of the winners.
+
+    TensorRT runs each TopK row on a single CTA, so one top-k over a whole image leaves the GPU idle.
+    Ties may resolve to different indices than torch.topk.
+    """
+    B, N = x.shape
+    tiles = min(tiles, N // k)
+    if tiles <= 1:
+        return torch.topk(x, k).indices
+    n = -(-N // tiles)
+    if n * tiles != N:
+        x = F.pad(x, (0, n * tiles - N), value=float("-inf"))
+    values, inds = torch.topk(x.reshape(B, tiles, n), k)
+    inds = inds + torch.arange(tiles, device=x.device)[:, None] * n
+    best = torch.topk(values.reshape(B, tiles * k), k).indices
+    return inds.reshape(B, tiles * k).gather(1, best)
+
+
 # @torch.compile()
 def sample_keypoints(
     keypoint_probs: torch.Tensor,
@@ -108,7 +127,7 @@ def sample_keypoints(
         frame[..., 4:-4, 4:-4] = 1
         keypoint_probs = keypoint_probs * frame
     if sample_topk:
-        inds = torch.topk(keypoint_probs.reshape(B, H * W), k=num_samples).indices
+        inds = topk_indices(keypoint_probs.reshape(B, H * W), num_samples)
     else:
         inds = torch.multinomial(
             keypoint_probs.reshape(B, H * W), num_samples=num_samples, replacement=False
